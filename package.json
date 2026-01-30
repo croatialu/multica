@@ -11,7 +11,7 @@
     "multica-profile": "./bin/multica-profile.mjs"
   },
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "concurrently -n gateway,console,web -c blue,yellow,green \"pnpm dev:gateway\" \"pnpm dev:console\" \"pnpm dev:web\"",
     "agent:cli": "tsx src/agent/cli.ts",
     "agent:interactive": "tsx src/agent/interactive-cli.ts",
     "agent:profile": "tsx src/agent/profile-cli.ts",
@@ -38,6 +38,7 @@
     "@types/turndown": "^5.0.6",
     "@types/uuid": "^11.0.0",
     "@vitest/coverage-v8": "^4.0.18",
+    "concurrently": "^9.2.1",
     "esbuild": "^0.27.2",
     "tsx": "^4.21.0",
     "turbo": "^2.3.4",
