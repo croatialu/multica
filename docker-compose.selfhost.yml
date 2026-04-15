@@ -36,6 +36,8 @@ services:
         condition: service_healthy
     ports:
       - "${PORT:-8080}:8080"
+    volumes:
+      - backend_uploads:/app/data/uploads
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-multica}:${POSTGRES_PASSWORD:-multica}@postgres:5432/${POSTGRES_DB:-multica}?sslmode=disable
       PORT: "8080"
@@ -49,6 +51,8 @@ services:
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:3000/auth/callback}
       S3_BUCKET: ${S3_BUCKET:-}
       S3_REGION: ${S3_REGION:-us-west-2}
+      LOCAL_UPLOAD_DIR: ${LOCAL_UPLOAD_DIR:-/app/data/uploads}
+      LOCAL_UPLOAD_BASE_URL: ${LOCAL_UPLOAD_BASE_URL:-}
       CLOUDFRONT_DOMAIN: ${CLOUDFRONT_DOMAIN:-}
       CLOUDFRONT_KEY_PAIR_ID: ${CLOUDFRONT_KEY_PAIR_ID:-}
       CLOUDFRONT_PRIVATE_KEY: ${CLOUDFRONT_PRIVATE_KEY:-}
@@ -72,3 +76,4 @@ services:
 
 volumes:
   pgdata:
+  backend_uploads:
