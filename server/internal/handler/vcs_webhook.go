@@ -2,10 +2,13 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -149,6 +152,17 @@ func (h *Handler) HandleVCSWebhook(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.mirrorVCSCIStatus(r.Context(), conn, st)
 		}
+	case vcs.EventReview:
+		reviewProvider, supported := provider.(vcs.ReviewProvider)
+		if !supported {
+			break
+		}
+		review, parseErr := reviewProvider.ParseReview(body)
+		if parseErr != nil {
+			slog.Warn("vcs: bad review payload", "provider", conn.Provider, "err", parseErr)
+			break
+		}
+		h.mirrorVCSReview(r.Context(), conn, reviewProvider, review)
 	default:
 		// Acknowledge unmodelled events so the provider doesn't flag the hook.
 	}
@@ -162,26 +176,27 @@ func (h *Handler) mirrorVCSPullRequest(ctx context.Context, conn db.VcsConnectio
 	}
 
 	pr, err := h.Queries.UpsertVCSPullRequest(ctx, db.UpsertVCSPullRequestParams{
-		WorkspaceID:     conn.WorkspaceID,
-		ConnectionID:    conn.ID,
-		Provider:        conn.Provider,
-		RepoOwner:       ev.RepoOwner,
-		RepoName:        ev.RepoName,
-		PrNumber:        ev.Number,
-		Title:           ev.Title,
-		State:           ev.State,
-		HtmlUrl:         ev.HTMLURL,
-		Branch:          ptrToText(strPtrOrNil(ev.Branch)),
-		AuthorLogin:     ptrToText(strPtrOrNil(ev.AuthorLogin)),
-		AuthorAvatarUrl: ptrToText(strPtrOrNil(ev.AuthorAvatarURL)),
-		MergedAt:        parseGHTime(ev.MergedAt),
-		ClosedAt:        parseGHTime(ev.ClosedAt),
-		PrCreatedAt:     parseGHTimeRequired(ev.CreatedAt),
-		PrUpdatedAt:     parseGHTimeRequired(ev.UpdatedAt),
-		Additions:       ev.Additions,
-		Deletions:       ev.Deletions,
-		ChangedFiles:    ev.ChangedFiles,
-		HeadSha:         ev.HeadSHA,
+		WorkspaceID:         conn.WorkspaceID,
+		ConnectionID:        conn.ID,
+		Provider:            conn.Provider,
+		RepoOwner:           ev.RepoOwner,
+		RepoName:            ev.RepoName,
+		PrNumber:            ev.Number,
+		Title:               ev.Title,
+		State:               ev.State,
+		HtmlUrl:             ev.HTMLURL,
+		Branch:              ptrToText(strPtrOrNil(ev.Branch)),
+		AuthorLogin:         ptrToText(strPtrOrNil(ev.AuthorLogin)),
+		AuthorAvatarUrl:     ptrToText(strPtrOrNil(ev.AuthorAvatarURL)),
+		MergedAt:            parseGHTime(ev.MergedAt),
+		ClosedAt:            parseGHTime(ev.ClosedAt),
+		PrCreatedAt:         parseGHTimeRequired(ev.CreatedAt),
+		PrUpdatedAt:         parseGHTimeRequired(ev.UpdatedAt),
+		Additions:           ev.Additions,
+		Deletions:           ev.Deletions,
+		ChangedFiles:        ev.ChangedFiles,
+		HeadSha:             ev.HeadSHA,
+		DetailedMergeStatus: ev.DetailedMergeStatus,
 	})
 	if err != nil {
 		slog.Warn("vcs: upsert pr failed", "err", err)
@@ -259,6 +274,24 @@ func (h *Handler) mirrorVCSPullRequest(ctx context.Context, conn db.VcsConnectio
 		reevalIssues = append(reevalIssues, issue)
 	}
 
+	if ev.DetailedMergeStatus == "need_rebase" && ev.HeadSHA != "" {
+		if _, err := h.Queries.CreateVCSPullRequestNotification(ctx, db.CreateVCSPullRequestNotificationParams{
+			PullRequestID: pr.ID, HeadSha: ev.HeadSHA, Kind: "need_rebase",
+		}); err == nil {
+			issues, listErr := h.Queries.ListIssuesForVCSPullRequest(ctx, pr.ID)
+			if listErr != nil {
+				slog.Warn("vcs: list linked issues for need_rebase failed", "err", listErr)
+			}
+			for _, issue := range issues {
+				h.createVCSSystemComment(ctx, issue, fmt.Sprintf(
+					"GitLab merge request needs a rebase.\n\nMR: %s\nHead SHA: `%s`\nStatus: `need_rebase`",
+					ev.HTMLURL, ev.HeadSHA), true)
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("vcs: record need_rebase notification failed", "err", err)
+		}
+	}
+
 	if ev.State == "merged" || ev.State == "closed" {
 		for _, issue := range reevalIssues {
 			// A custom terminal status counts as terminal here. (MUL-6243)
@@ -280,6 +313,102 @@ func (h *Handler) mirrorVCSPullRequest(ctx context.Context, conn db.VcsConnectio
 		"pull_request":     resp,
 		"linked_issue_ids": linkedIssueIDs,
 	})
+}
+
+func (h *Handler) mirrorVCSReview(ctx context.Context, conn db.VcsConnection, provider vcs.ReviewProvider, ev vcs.ReviewEvent) {
+	if ev.System || ev.Action != "create" || ev.ReviewerLogin == "" ||
+		strings.EqualFold(ev.ReviewerLogin, conn.AccountLogin) {
+		return
+	}
+	if ev.DiscussionID == "" {
+		token, err := h.openVCSSecret(conn.AccessTokenEncrypted)
+		if err != nil {
+			slog.Warn("vcs: decrypt access token for review enrichment failed", "err", err)
+			return
+		}
+		enriched, err := provider.EnrichReview(ctx, conn.InstanceUrl, token, ev)
+		if err != nil {
+			slog.Warn("vcs: enrich review discussion failed", "err", err)
+			return
+		}
+		ev = enriched
+	}
+	if ev.DiscussionID == "" || ev.NoteID == "" || ev.Body == "" {
+		return
+	}
+	pr, err := h.Queries.GetVCSPullRequestByExternalID(ctx, db.GetVCSPullRequestByExternalIDParams{
+		ConnectionID: conn.ID, RepoOwner: ev.RepoOwner, RepoName: ev.RepoName, PrNumber: ev.Number,
+	})
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("vcs: lookup review merge request failed", "err", err)
+		}
+		return
+	}
+	// A note for an older head is retained by GitLab, but must not start a run
+	// against a different checkout. A fresh Note Hook carries last_commit.id.
+	if ev.HeadSHA == "" || ev.HeadSHA != pr.HeadSha {
+		slog.Warn("vcs: ignore review for stale merge request head", "event_head", ev.HeadSHA, "stored_head", pr.HeadSha)
+		return
+	}
+	position := ev.Position
+	if len(position) == 0 || string(position) == "null" {
+		position = json.RawMessage(`{}`)
+	}
+	thread, err := h.Queries.CreateVCSReviewThread(ctx, db.CreateVCSReviewThreadParams{
+		WorkspaceID: conn.WorkspaceID, ConnectionID: conn.ID, PullRequestID: pr.ID,
+		Provider: conn.Provider, DiscussionID: ev.DiscussionID, NoteID: ev.NoteID,
+		NoteUrl: ev.NoteURL, ReviewerLogin: ev.ReviewerLogin, ReviewerName: ev.ReviewerName,
+		ReviewerAvatarUrl: ev.ReviewerAvatarURL, Body: ev.Body, HeadSha: ev.HeadSHA,
+		Position: position, Resolvable: ev.Resolvable, Resolved: ev.Resolved, EventAction: ev.Action,
+	})
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("vcs: store review thread failed", "err", err)
+		}
+		return // duplicate delivery is deliberately silent
+	}
+	issues, err := h.Queries.ListIssuesForVCSPullRequest(ctx, pr.ID)
+	if err != nil {
+		slog.Warn("vcs: list linked issues for review failed", "err", err)
+		return
+	}
+	for _, issue := range issues {
+		content := fmt.Sprintf(
+			"GitLab review discussion from @%s\n\n%s\n\nMR: %s\nDiscussion: `%s`\nReview ID: `%s`\nReview head SHA: `%s`\n\nAfter pushing the fix, use the pushed commit as the expected head: `multica issue review reply %s %s --body-file ./reply.md --expected-head-sha $(git rev-parse HEAD)`, then resolve with `multica issue review resolve %s %s --expected-head-sha $(git rev-parse HEAD)`.",
+			ev.ReviewerLogin, ev.Body, ev.MRURL, ev.DiscussionID, uuidToString(thread.ID), ev.HeadSHA,
+			uuidToString(issue.ID), uuidToString(thread.ID),
+			uuidToString(issue.ID), uuidToString(thread.ID))
+		h.createVCSSystemComment(ctx, issue, content, true)
+	}
+}
+
+func (h *Handler) createVCSSystemComment(ctx context.Context, issue db.Issue, content string, trigger bool) {
+	comment, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
+		IssueID: issue.ID, WorkspaceID: issue.WorkspaceID, AuthorType: "system",
+		AuthorID: pgtype.UUID{Valid: true}, Content: content, Type: "system",
+		ParentID: pgtype.UUID{},
+	})
+	if err != nil {
+		slog.Warn("vcs: create system comment failed", "err", err)
+		return
+	}
+	h.publish(protocol.EventCommentCreated, uuidToString(issue.WorkspaceID), "system", "", map[string]any{
+		"comment": commentToResponse(comment, nil, nil), "issue_title": issue.Title,
+		"issue_assignee_type": textToPtr(issue.AssigneeType), "issue_assignee_id": uuidToPtr(issue.AssigneeID),
+		"issue_status": issue.Status,
+	})
+	if trigger {
+		// Route only to the linked issue's assignee. Passing the external review
+		// body through generic mention parsing would let provider-controlled text
+		// name arbitrary Multica agents. The normal assignee resolver and enqueue
+		// pipeline still provide invocation gates, head-scoped dedup, coalescing,
+		// and task attribution for this system principal.
+		opts := commentTriggerComputeOptions{ExcludeTriggerCommentID: comment.ID}
+		if assignee, ok := h.routeAssigneeFallback(ctx, issue, "system", "", opts); ok {
+			h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, []commentAgentTrigger{assignee})
+		}
+	}
 }
 
 func (h *Handler) mirrorVCSCIStatus(ctx context.Context, conn db.VcsConnection, ev vcs.CIStatusEvent) {

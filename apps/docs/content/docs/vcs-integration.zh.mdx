@@ -45,7 +45,7 @@ MULTICA_VCS_SECRET_KEY=<base64 32 字节密钥>
 
 1. 在代码托管中创建具备仓库读取权限的访问令牌：
    - **Forgejo / Gitea**：设置 → 应用。
-   - **GitLab**：具备 `read_api` 权限的个人（或群组/项目）访问令牌。
+   - **GitLab**：具备 `api` 权限的个人（或群组/项目）访问令牌；回复 review 与解决 discussion 需要写 API 权限。
 2. 在 Multica 中打开 **设置 → 集成 → Git 代码托管**。
 3. 选择**提供方**，填写实例地址（例如 `https://forgejo.example.com`）和访问令牌，点击 **连接**。Multica 会先用该令牌访问实例进行校验，再保存。
 4. 复制连接后显示的 **Webhook 地址** 与 **Webhook 密钥**。
@@ -69,7 +69,7 @@ Webhook 密钥只显示一次，请在离开页面前复制。重新连接同一
 
 - **URL**：Webhook 地址。
 - **Secret token**：Webhook 密钥（作为 `X-Gitlab-Token` 发送并逐字比对）。
-- **触发器**：启用 **Merge request events**，并启用 **Pipeline events** 以镜像 CI。
+- **触发器**：启用 **Merge request events**、**Comments**（Note events），并启用 **Pipeline events** 以镜像 CI。
 
 Multica 会用存储的密钥校验每次投递，因此没有匹配密钥的 Webhook 会被拒绝。
 
@@ -78,6 +78,8 @@ Multica 会用存储的密钥校验每次投递，因此没有匹配密钥的 We
 - **Pull / Merge Request** —— open、closed、merged、draft 状态，以及作者、分支和（在代码托管提供时）diff 统计。
 - **issue 关联** —— 标题、正文或分支中的编号会将 PR 关联到 issue。合并的 PR 带有关闭关键字（`Closes`/`Fixes`/`Resolves MUL-123`）且没有仍处于 open 的关联 PR 时，issue 会被移动到「完成」。
 - **CI** —— Forgejo/Gitea 的提交状态与 GitLab 的流水线会汇总为 head commit 的通过/失败/进行中检查条。
+- **GitLab review discussion** —— 新的人类 MR discussion 只会恢复一次关联 issue 的受派智能体。修复推送后，智能体可回复并明确解决该 discussion；Multica 会校验当前 MR head、审计每次动作，并忽略集成账号自己发出的 note，避免循环触发。
+- **GitLab rebase 状态** —— `need_rebase` 会按 MR head 去重并单独通知关联 issue，不与冲突、未解决 discussion、CI 或 requested changes 混为一类。
 
 ## 智能体创建 Pull Request
 

@@ -50,7 +50,7 @@ Set `MULTICA_PUBLIC_URL` to the server's public base URL so Multica can show a r
 
 1. Create an access token in your provider with read access to the repositories you want mirrored:
    - **Forgejo / Gitea**: Settings → Applications.
-   - **GitLab**: a personal (or group/project) access token with the `read_api` scope.
+   - **GitLab**: a personal (or group/project) access token with the `api` scope. Review replies and discussion resolution require write API access.
 2. In Multica, open **Settings → Integrations → Git providers**.
 3. Choose the **provider**, enter the instance URL (for example `https://forgejo.example.com`) and the access token, then **Connect**. Multica validates the token against the instance before saving.
 4. Copy the **webhook URL** and **webhook secret** shown after connecting.
@@ -74,7 +74,7 @@ On the repository (or organisation/group, to cover every repo):
 
 - **URL**: the webhook URL.
 - **Secret token**: the webhook secret (sent as `X-Gitlab-Token` and compared verbatim).
-- **Triggers**: enable **Merge request events**, and **Pipeline events** to mirror CI.
+- **Triggers**: enable **Merge request events**, **Comments** (Note events), and **Pipeline events** to mirror CI.
 
 Multica authenticates every delivery against the stored secret, so a webhook without the matching secret is rejected.
 
@@ -83,6 +83,8 @@ Multica authenticates every delivery against the stored secret, so a webhook wit
 - **Pull / merge requests** — open, closed, merged, and draft state, author, branch, and (where the provider supplies them) diff stats.
 - **Issue links** — identifiers in the title, body, or branch link the PR to the issue. A closing keyword (`Closes`/`Fixes`/`Resolves MUL-123`) on a merged PR moves the issue to **Done** once no linked PR is still open.
 - **CI** — Forgejo/Gitea commit statuses and GitLab pipelines aggregate into a passed/failed/pending checks bar for the head commit.
+- **GitLab review discussions** — a new human MR discussion resumes the linked issue's assigned agent once. After pushing a fix, the agent can reply to that exact discussion and explicitly resolve it. Multica validates the current MR head and records every action; integration-authored notes do not trigger another run.
+- **GitLab rebase state** — `need_rebase` is posted to linked issues once per MR head, separately from conflicts, unresolved discussions, CI, or requested changes.
 
 ## Agents opening pull requests
 

@@ -46,6 +46,23 @@ cleared_links AS (
         WHERE vcs_pull_request.connection_id IN (SELECT target.id FROM target)
     )
 ),
+cleared_review_actions AS (
+    DELETE FROM vcs_review_action
+    WHERE review_thread_id IN (
+        SELECT id FROM vcs_review_thread
+        WHERE connection_id IN (SELECT target.id FROM target)
+    )
+),
+cleared_review_threads AS (
+    DELETE FROM vcs_review_thread WHERE connection_id IN (SELECT target.id FROM target)
+),
+cleared_notifications AS (
+    DELETE FROM vcs_pull_request_notification
+    WHERE pull_request_id IN (
+        SELECT id FROM vcs_pull_request
+        WHERE connection_id IN (SELECT target.id FROM target)
+    )
+),
 cleared_statuses AS (
     DELETE FROM vcs_commit_status WHERE connection_id IN (SELECT target.id FROM target)
 ),
@@ -76,12 +93,12 @@ INSERT INTO vcs_pull_request (
     workspace_id, connection_id, provider, repo_owner, repo_name, pr_number,
     title, state, html_url, branch, author_login, author_avatar_url,
     merged_at, closed_at, pr_created_at, pr_updated_at,
-    additions, deletions, changed_files, head_sha
+    additions, deletions, changed_files, head_sha, detailed_merge_status
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
     $7, $8, $9, sqlc.narg('branch'), sqlc.narg('author_login'), sqlc.narg('author_avatar_url'),
     sqlc.narg('merged_at'), sqlc.narg('closed_at'), $10, $11,
-    $12, $13, $14, $15
+    $12, $13, $14, $15, $16
 )
 ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     workspace_id      = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.workspace_id      ELSE vcs_pull_request.workspace_id      END,
@@ -99,7 +116,71 @@ ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     deletions         = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.deletions         ELSE vcs_pull_request.deletions         END,
     changed_files     = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.changed_files     ELSE vcs_pull_request.changed_files     END,
     head_sha          = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.head_sha          ELSE vcs_pull_request.head_sha          END,
+    detailed_merge_status = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.detailed_merge_status ELSE vcs_pull_request.detailed_merge_status END,
     updated_at        = now()
+RETURNING *;
+
+-- name: GetVCSPullRequestByExternalID :one
+SELECT * FROM vcs_pull_request
+WHERE connection_id = $1 AND repo_owner = $2 AND repo_name = $3 AND pr_number = $4;
+
+-- name: GetVCSPullRequest :one
+SELECT * FROM vcs_pull_request WHERE id = $1;
+
+-- name: ListIssuesForVCSPullRequest :many
+SELECT i.* FROM issue i
+JOIN issue_vcs_pull_request ipr ON ipr.issue_id = i.id
+WHERE ipr.pull_request_id = $1 AND NOT ipr.reference_only
+ORDER BY i.created_at;
+
+-- name: CreateVCSReviewThread :one
+INSERT INTO vcs_review_thread (
+    workspace_id, connection_id, pull_request_id, provider, discussion_id,
+    note_id, note_url, reviewer_login, reviewer_name, reviewer_avatar_url,
+    body, head_sha, position, resolvable, resolved, event_action
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+    $11, $12, $13, $14, $15, $16
+)
+ON CONFLICT (connection_id, pull_request_id, note_id) DO NOTHING
+RETURNING *;
+
+-- name: GetVCSReviewThreadForIssue :one
+SELECT rt.* FROM vcs_review_thread rt
+JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = rt.pull_request_id
+WHERE rt.id = $1 AND ipr.issue_id = $2 AND NOT ipr.reference_only;
+
+-- name: CreateVCSReviewAction :one
+INSERT INTO vcs_review_action (
+    request_id, workspace_id, issue_id, review_thread_id, agent_id, task_id,
+    action, expected_head_sha, body, status
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
+ON CONFLICT (request_id) DO NOTHING
+RETURNING *;
+
+-- name: GetVCSReviewAction :one
+SELECT * FROM vcs_review_action WHERE request_id = $1;
+
+-- name: CompleteVCSReviewAction :one
+UPDATE vcs_review_action SET
+    status = $2, external_note_id = $3, error = $4, updated_at = now()
+WHERE request_id = $1
+RETURNING *;
+
+-- name: HasSuccessfulVCSReviewReply :one
+SELECT EXISTS (
+    SELECT 1 FROM vcs_review_action
+    WHERE review_thread_id = $1 AND expected_head_sha = $2
+      AND action = 'reply' AND status = 'succeeded'
+);
+
+-- name: MarkVCSReviewThreadResolved :exec
+UPDATE vcs_review_thread SET resolved = TRUE, updated_at = now() WHERE id = $1;
+
+-- name: CreateVCSPullRequestNotification :one
+INSERT INTO vcs_pull_request_notification (pull_request_id, head_sha, kind)
+VALUES ($1, $2, $3)
+ON CONFLICT DO NOTHING
 RETURNING *;
 
 -- name: ListVCSPullRequestsByIssue :many

@@ -633,6 +633,54 @@ func TestRunIssuePullRequestsListsLinkedPRsAsJSON(t *testing.T) {
 	}
 }
 
+func newIssueReviewReplyTestCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "reply"}
+	cmd.Flags().String("body-file", "", "")
+	cmd.Flags().Bool("allow-external-file", false, "")
+	cmd.Flags().String("expected-head-sha", "", "")
+	cmd.Flags().String("request-id", "", "")
+	cmd.Flags().String("output", "json", "")
+	return cmd
+}
+
+func TestRunIssueReviewReplyUsesStructuredAction(t *testing.T) {
+	const issueID = "11111111-1111-4111-8111-111111111111"
+	const reviewID = "22222222-2222-4222-8222-222222222222"
+	const requestID = "33333333-3333-4333-8333-333333333333"
+	var action map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/issues/TST-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": issueID, "identifier": "TST-1"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/issues/"+issueID+"/reviews/"+reviewID+"/actions":
+			if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"request_id": requestID, "status": "succeeded"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	setCLITestServerEnv(t, srv.URL)
+	t.Setenv("MULTICA_TOKEN", "mat_test-token")
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("review-reply.md", []byte("Fixed and covered by a regression test.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newIssueReviewReplyTestCmd()
+	_ = cmd.Flags().Set("body-file", "review-reply.md")
+	_ = cmd.Flags().Set("expected-head-sha", "deadbeef")
+	_ = cmd.Flags().Set("request-id", requestID)
+	if _, err := captureStdout(t, func() error { return runIssueReviewReply(cmd, []string{"TST-1", reviewID}) }); err != nil {
+		t.Fatalf("runIssueReviewReply: %v", err)
+	}
+	if action["action"] != "reply" || action["body"] != "Fixed and covered by a regression test." ||
+		action["expected_head_sha"] != "deadbeef" || action["request_id"] != requestID {
+		t.Fatalf("action payload = %#v", action)
+	}
+}
+
 func newIssueUsageTestCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "usage"}
 	cmd.Flags().String("output", "table", "")

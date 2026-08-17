@@ -335,6 +335,16 @@ deleted_issue_vcs_links AS (
     WHERE issue_id IN (SELECT id FROM ws_issues)
        OR pull_request_id IN (SELECT id FROM ws_vcs_prs)
 ),
+deleted_vcs_review_actions AS (
+    DELETE FROM vcs_review_action WHERE workspace_id = $1
+),
+deleted_vcs_review_threads AS (
+    DELETE FROM vcs_review_thread WHERE workspace_id = $1
+),
+deleted_vcs_pr_notifications AS (
+    DELETE FROM vcs_pull_request_notification
+    WHERE pull_request_id IN (SELECT id FROM ws_vcs_prs)
+),
 deleted_agent_invocation_targets AS (
     DELETE FROM agent_invocation_target
     WHERE agent_id IN (SELECT id FROM ws_agents)

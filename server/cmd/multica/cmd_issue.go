@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/multica-ai/multica/server/internal/cli"
@@ -187,6 +188,25 @@ var issuePullRequestsCmd = &cobra.Command{
 	Short:   "List pull requests linked to an issue",
 	Args:    exactArgs(1),
 	RunE:    runIssuePullRequests,
+}
+
+var issueReviewCmd = &cobra.Command{
+	Use:   "review",
+	Short: "Act on linked code review discussions",
+}
+
+var issueReviewReplyCmd = &cobra.Command{
+	Use:   "reply <issue-id> <review-id>",
+	Short: "Reply to a linked review discussion",
+	Args:  exactArgs(2),
+	RunE:  runIssueReviewReply,
+}
+
+var issueReviewResolveCmd = &cobra.Command{
+	Use:   "resolve <issue-id> <review-id>",
+	Short: "Resolve a linked review discussion after replying",
+	Args:  exactArgs(2),
+	RunE:  runIssueReviewResolve,
 }
 
 var issueChildrenCmd = &cobra.Command{
@@ -445,6 +465,7 @@ func init() {
 	issueCmd.AddCommand(issueListCmd)
 	issueCmd.AddCommand(issueGetCmd)
 	issueCmd.AddCommand(issuePullRequestsCmd)
+	issueCmd.AddCommand(issueReviewCmd)
 	issueCmd.AddCommand(issueChildrenCmd)
 	issueCmd.AddCommand(issueCreateCmd)
 	issueCmd.AddCommand(issueUpdateCmd)
@@ -465,6 +486,8 @@ func init() {
 	issueCommentCmd.AddCommand(issueCommentDeleteCmd)
 	issueCommentCmd.AddCommand(issueCommentResolveCmd)
 	issueCommentCmd.AddCommand(issueCommentUnresolveCmd)
+	issueReviewCmd.AddCommand(issueReviewReplyCmd)
+	issueReviewCmd.AddCommand(issueReviewResolveCmd)
 
 	issueSubscriberCmd.AddCommand(issueSubscriberListCmd)
 	issueSubscriberCmd.AddCommand(issueSubscriberAddCmd)
@@ -588,6 +611,16 @@ func init() {
 	// issue comment resolve/unresolve
 	issueCommentResolveCmd.Flags().String("output", "json", "Output format: table or json")
 	issueCommentUnresolveCmd.Flags().String("output", "json", "Output format: table or json")
+
+	// issue review reply/resolve
+	issueReviewReplyCmd.Flags().String("body-file", "", "Read the UTF-8 reply body from a file inside the current working directory")
+	issueReviewReplyCmd.Flags().Bool("allow-external-file", false, "Allow --body-file outside the current working directory")
+	issueReviewReplyCmd.Flags().String("expected-head-sha", "", "Current merge request head SHA (required)")
+	issueReviewReplyCmd.Flags().String("request-id", "", "Idempotency UUID (generated when omitted)")
+	issueReviewReplyCmd.Flags().String("output", "json", "Output format: json")
+	issueReviewResolveCmd.Flags().String("expected-head-sha", "", "Current merge request head SHA (required)")
+	issueReviewResolveCmd.Flags().String("request-id", "", "Idempotency UUID (generated when omitted)")
+	issueReviewResolveCmd.Flags().String("output", "json", "Output format: json")
 
 	// issue search
 	issueSearchCmd.Flags().Int("limit", 20, "Maximum number of results to return")
@@ -794,6 +827,68 @@ func runIssuePullRequests(cmd *cobra.Command, args []string) error {
 	prs, _ := result["pull_requests"].([]any)
 	printIssuePullRequestsTable(normalizePullRequestList(prs))
 	return nil
+}
+
+func runIssueReviewReply(cmd *cobra.Command, args []string) error {
+	bodyFile, _ := cmd.Flags().GetString("body-file")
+	if bodyFile == "" {
+		return fmt.Errorf("--body-file is required")
+	}
+	if err := ensureFileFlagWithinWorkdir(cmd, "body-file", "review-reply", bodyFile); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(bodyFile)
+	if err != nil {
+		return fmt.Errorf("read --body-file: %w", err)
+	}
+	body := strings.TrimSpace(string(data))
+	if body == "" {
+		return fmt.Errorf("--body-file is empty")
+	}
+	return runIssueReviewAction(cmd, args, "reply", body)
+}
+
+func runIssueReviewResolve(cmd *cobra.Command, args []string) error {
+	return runIssueReviewAction(cmd, args, "resolve", "")
+}
+
+func runIssueReviewAction(cmd *cobra.Command, args []string, action, body string) error {
+	headSHA, _ := cmd.Flags().GetString("expected-head-sha")
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" {
+		return fmt.Errorf("--expected-head-sha is required")
+	}
+	requestID, _ := cmd.Flags().GetString("request-id")
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
+	if _, err := uuid.Parse(requestID); err != nil {
+		return fmt.Errorf("--request-id must be a UUID")
+	}
+	if _, err := uuid.Parse(args[1]); err != nil {
+		return fmt.Errorf("review-id must be a UUID")
+	}
+
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+	issueRef, err := resolveIssueRef(ctx, client, args[0])
+	if err != nil {
+		return fmt.Errorf("resolve issue: %w", err)
+	}
+	payload := map[string]any{
+		"request_id": requestID, "action": action,
+		"expected_head_sha": headSHA, "body": body,
+	}
+	var result map[string]any
+	path := "/api/issues/" + url.PathEscape(issueRef.ID) + "/reviews/" + url.PathEscape(args[1]) + "/actions"
+	if err := client.PostJSON(ctx, path, payload, &result); err != nil {
+		return fmt.Errorf("%s review discussion: %w", action, err)
+	}
+	return cli.PrintJSON(os.Stdout, result)
 }
 
 func normalizePullRequestList(raw []any) []map[string]any {

@@ -13,6 +13,7 @@ package vcs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 )
@@ -49,6 +50,7 @@ const (
 	EventOther EventKind = iota
 	EventPullRequest
 	EventCIStatus
+	EventReview
 )
 
 // PullRequestEvent is the provider-agnostic shape of a pull/merge request
@@ -58,25 +60,75 @@ const (
 type PullRequestEvent struct {
 	// Action is the raw provider action (e.g. "opened", "closed", "merge").
 	// The handler only needs to know whether it is terminal; see Terminal.
-	Action          string
-	RepoOwner       string
-	RepoName        string
+	Action              string
+	RepoOwner           string
+	RepoName            string
+	Number              int32
+	Title               string
+	Body                string
+	State               string // open | closed | merged | draft
+	HTMLURL             string
+	Branch              string
+	HeadSHA             string
+	AuthorLogin         string
+	AuthorAvatarURL     string
+	Additions           int32
+	Deletions           int32
+	ChangedFiles        int32
+	MergedAt            string // RFC3339 or empty
+	ClosedAt            string
+	CreatedAt           string
+	UpdatedAt           string
+	DetailedMergeStatus string
+}
+
+// ReviewEvent is a provider-neutral review discussion note. Provider adapters
+// retain the external identifiers and diff position so later actions can be
+// validated against the provider rather than inferred from comment prose.
+type ReviewEvent struct {
+	RepoOwner         string
+	RepoName          string
+	Number            int32
+	MRURL             string
+	NoteURL           string
+	HeadSHA           string
+	DiscussionID      string
+	NoteID            string
+	ReviewerLogin     string
+	ReviewerName      string
+	ReviewerAvatarURL string
+	Body              string
+	Action            string
+	System            bool
+	Resolvable        bool
+	Resolved          bool
+	Position          json.RawMessage
+}
+
+type ReviewTarget struct {
+	ProjectPath     string
 	Number          int32
-	Title           string
-	Body            string
-	State           string // open | closed | merged | draft
-	HTMLURL         string
-	Branch          string
-	HeadSHA         string
-	AuthorLogin     string
-	AuthorAvatarURL string
-	Additions       int32
-	Deletions       int32
-	ChangedFiles    int32
-	MergedAt        string // RFC3339 or empty
-	ClosedAt        string
-	CreatedAt       string
-	UpdatedAt       string
+	DiscussionID    string
+	NoteID          string
+	ExpectedHeadSHA string
+}
+
+type ReviewState struct {
+	HeadSHA    string
+	Open       bool
+	Resolvable bool
+	Resolved   bool
+}
+
+// ReviewProvider is implemented only by providers that expose review
+// discussion APIs. Keeping it optional avoids forcing Forgejo/Gitea to pretend
+// they support a contract their current webhook adapters do not provide.
+type ReviewProvider interface {
+	ParseReview(body []byte) (ReviewEvent, error)
+	EnrichReview(ctx context.Context, instanceURL, token string, event ReviewEvent) (ReviewEvent, error)
+	ValidateReview(ctx context.Context, instanceURL, token string, target ReviewTarget) (ReviewState, error)
+	ReplyReview(ctx context.Context, instanceURL, token string, target ReviewTarget, body string) (string, error)
+	ResolveReview(ctx context.Context, instanceURL, token string, target ReviewTarget) error
 }
 
 // Terminal reports whether this event is the PR's merge/close event, after

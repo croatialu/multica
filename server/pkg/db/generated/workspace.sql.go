@@ -155,6 +155,16 @@ cleared_vcs_pr_links AS (
     DELETE FROM issue_vcs_pull_request
     WHERE pull_request_id IN (SELECT id FROM ws_vcs_prs)
 ),
+cleared_vcs_review_actions AS (
+    DELETE FROM vcs_review_action WHERE workspace_id = $1
+),
+cleared_vcs_review_threads AS (
+    DELETE FROM vcs_review_thread WHERE workspace_id = $1
+),
+cleared_vcs_pr_notifications AS (
+    DELETE FROM vcs_pull_request_notification
+    WHERE pull_request_id IN (SELECT id FROM ws_vcs_prs)
+),
 cleared_vcs_commit_statuses AS (
     DELETE FROM vcs_commit_status
     WHERE connection_id IN (SELECT id FROM ws_vcs_connections)

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,6 +64,9 @@ func seedVCSConnection(t *testing.T, ctx context.Context, box *secretbox.Box, pr
 }
 
 func cleanupVCS(ctx context.Context, issueID string) {
+	testPool.Exec(ctx, `DELETE FROM vcs_review_action WHERE workspace_id = $1`, testWorkspaceID)
+	testPool.Exec(ctx, `DELETE FROM vcs_review_thread WHERE workspace_id = $1`, testWorkspaceID)
+	testPool.Exec(ctx, `DELETE FROM vcs_pull_request_notification n USING vcs_pull_request pr WHERE n.pull_request_id = pr.id AND pr.workspace_id = $1`, testWorkspaceID)
 	testPool.Exec(ctx, `DELETE FROM issue_vcs_pull_request WHERE issue_id = $1`, issueID)
 	testPool.Exec(ctx, `DELETE FROM vcs_commit_status cs USING vcs_connection c WHERE cs.connection_id = c.id AND c.workspace_id = $1`, testWorkspaceID)
 	testPool.Exec(ctx, `DELETE FROM vcs_pull_request WHERE workspace_id = $1`, testWorkspaceID)
@@ -70,6 +74,206 @@ func cleanupVCS(ctx context.Context, issueID string) {
 	if issueID != "" {
 		testPool.Exec(ctx, `DELETE FROM activity_log WHERE issue_id = $1`, issueID)
 		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+	}
+}
+
+func gitlabWebhook(t *testing.T, connID, event string, payload map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	testHandler.HandleVCSWebhook(w, vcsWebhookReq(connID, map[string]string{
+		"X-Gitlab-Event": event, "X-Gitlab-Token": vcsTestSecret,
+	}, raw))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("%s: got %d: %s", event, w.Code, w.Body.String())
+	}
+	return w
+}
+
+func gitlabMRPayload(issue IssueResponse, head, updatedAt, detailedStatus string) map[string]any {
+	return map[string]any{
+		"object_kind": "merge_request",
+		"user":        map[string]any{"username": "author"},
+		"project":     map[string]any{"path_with_namespace": "acme/widget"},
+		"object_attributes": map[string]any{
+			"iid": 42, "title": "Fix " + issue.Identifier, "description": "",
+			"state": "opened", "action": "update", "source_branch": "fix/review",
+			"url":        "https://gitlab.test/acme/widget/-/merge_requests/42",
+			"created_at": "2026-08-17T01:00:00Z", "updated_at": updatedAt,
+			"last_commit": map[string]any{"id": head}, "detailed_merge_status": detailedStatus,
+		},
+	}
+}
+
+func gitlabNotePayload(noteID int, reviewer, head string) map[string]any {
+	return map[string]any{
+		"object_kind": "note",
+		"user":        map[string]any{"name": "Reviewer", "username": reviewer},
+		"project":     map[string]any{"path_with_namespace": "acme/widget"},
+		"object_attributes": map[string]any{
+			"id": noteID, "note": "Please cover the nil case", "noteable_type": "MergeRequest",
+			"discussion_id": "discussion-1", "system": false, "action": "create",
+			"url":        "https://gitlab.test/acme/widget/-/merge_requests/42#note_55",
+			"resolvable": true, "resolved": false,
+			"position": map[string]any{"head_sha": head, "new_path": "a.go", "new_line": 9},
+		},
+		"merge_request": map[string]any{
+			"iid": 42, "url": "https://gitlab.test/acme/widget/-/merge_requests/42",
+			"last_commit": map[string]any{"id": head},
+		},
+	}
+}
+
+func TestVCSWebhook_GitLabReviewAndNeedRebaseAreDeduplicated(t *testing.T) {
+	ctx := context.Background()
+	box := withVCSBox(t)
+	connID := seedVCSConnection(t, ctx, box, "gitlab", "https://gitlab.test")
+	issue := newVCSIssue(t, "GitLab review follow-up")
+	t.Cleanup(func() { cleanupVCS(ctx, issue.ID) })
+	agentID := createHandlerTestAgent(t, "GitLab Review Resume Agent", nil)
+	if _, err := testPool.Exec(ctx, `UPDATE issue SET assignee_type = 'agent', assignee_id = $2 WHERE id = $1`, issue.ID, agentID); err != nil {
+		t.Fatalf("assign agent: %v", err)
+	}
+
+	gitlabWebhook(t, connID, "Merge Request Hook", gitlabMRPayload(issue, "head-1", "2026-08-17T01:01:00Z", "mergeable"))
+	note := gitlabNotePayload(55, "human-reviewer", "head-1")
+	gitlabWebhook(t, connID, "Note Hook", note)
+	gitlabWebhook(t, connID, "Note Hook", note)
+
+	count, err := testHandler.Queries.CountComments(ctx, db.CountCommentsParams{IssueID: parseUUID(issue.ID), WorkspaceID: parseUUID(testWorkspaceID)})
+	if err != nil || count != 1 {
+		t.Fatalf("review comments = %d, err=%v; want 1", count, err)
+	}
+	var tasks int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status IN ('queued','dispatched','running','waiting_local_directory','deferred')`, issue.ID, agentID).Scan(&tasks); err != nil || tasks != 1 {
+		t.Fatalf("review-triggered tasks = %d, err=%v; want exactly 1", tasks, err)
+	}
+	var threads int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM vcs_review_thread WHERE workspace_id = $1`, testWorkspaceID).Scan(&threads); err != nil || threads != 1 {
+		t.Fatalf("review threads = %d, err=%v; want 1", threads, err)
+	}
+
+	// Notes authored by the connected integration account and stale-head notes
+	// are both ignored, preventing loops and wrong-checkout agent runs.
+	gitlabWebhook(t, connID, "Note Hook", gitlabNotePayload(56, "acme", "head-1"))
+	gitlabWebhook(t, connID, "Note Hook", gitlabNotePayload(57, "human-reviewer", "old-head"))
+	count, _ = testHandler.Queries.CountComments(ctx, db.CountCommentsParams{IssueID: parseUUID(issue.ID), WorkspaceID: parseUUID(testWorkspaceID)})
+	if count != 1 {
+		t.Fatalf("ignored notes changed comment count to %d", count)
+	}
+
+	needRebase := gitlabMRPayload(issue, "head-1", "2026-08-17T01:02:00Z", "need_rebase")
+	gitlabWebhook(t, connID, "Merge Request Hook", needRebase)
+	gitlabWebhook(t, connID, "Merge Request Hook", needRebase)
+	count, _ = testHandler.Queries.CountComments(ctx, db.CountCommentsParams{IssueID: parseUUID(issue.ID), WorkspaceID: parseUUID(testWorkspaceID)})
+	if count != 2 {
+		t.Fatalf("review + need_rebase comments = %d, want 2", count)
+	}
+}
+
+func TestVCSReviewAction_ReplyThenResolveAfterPush(t *testing.T) {
+	ctx := context.Background()
+	var providerCalls []string
+	gitlab := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("PRIVATE-TOKEN") != "tok" {
+			http.Error(w, "bad token", http.StatusUnauthorized)
+			return
+		}
+		providerCalls = append(providerCalls, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/merge_requests/42"):
+			_, _ = w.Write([]byte(`{"sha":"head-2","state":"opened"}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/discussions/discussion-1"):
+			_, _ = w.Write([]byte(`{"id":"discussion-1","notes":[{"id":55,"resolvable":true,"resolved":false}]}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/discussions/discussion-1/notes"):
+			_, _ = w.Write([]byte(`{"id":99}`))
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/discussions/discussion-1"):
+			_, _ = w.Write([]byte(`{"id":"discussion-1"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gitlab.Close()
+
+	box := withVCSBox(t)
+	connID := seedVCSConnection(t, ctx, box, "gitlab", gitlab.URL)
+	issue := newVCSIssue(t, "GitLab review action")
+	t.Cleanup(func() { cleanupVCS(ctx, issue.ID) })
+	gitlabWebhook(t, connID, "Merge Request Hook", gitlabMRPayload(issue, "head-1", "2026-08-17T02:01:00Z", "mergeable"))
+	gitlabWebhook(t, connID, "Note Hook", gitlabNotePayload(55, "human-reviewer", "head-1"))
+	// Simulate the agent's fix push and the following MR webhook. The review
+	// thread remains anchored to head-1, while actions must prove head-2 is the
+	// current provider and persisted MR head.
+	gitlabWebhook(t, connID, "Merge Request Hook", gitlabMRPayload(issue, "head-2", "2026-08-17T02:02:00Z", "mergeable"))
+
+	var reviewID string
+	if err := testPool.QueryRow(ctx, `SELECT id FROM vcs_review_thread WHERE workspace_id = $1 AND note_id = '55'`, testWorkspaceID).Scan(&reviewID); err != nil {
+		t.Fatalf("load review: %v", err)
+	}
+	agentID := createHandlerTestAgent(t, "GitLab Review Agent", nil)
+	if _, err := testPool.Exec(ctx, `UPDATE issue SET assignee_type = 'agent', assignee_id = $2 WHERE id = $1`, issue.ID, agentID); err != nil {
+		t.Fatalf("assign agent: %v", err)
+	}
+	taskID := createHandlerTestTaskForAgentOnIssue(t, agentID, issue.ID)
+
+	act := func(requestID, action, head, body string) *httptest.ResponseRecorder {
+		req := newRequest("POST", "/api/issues/"+issue.ID+"/reviews/"+reviewID+"/actions", map[string]any{
+			"request_id": requestID, "action": action, "expected_head_sha": head, "body": body,
+		})
+		req.Header.Set("X-Agent-ID", agentID)
+		req.Header.Set("X-Task-ID", taskID)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", issue.ID)
+		rctx.URLParams.Add("reviewId", reviewID)
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+		w := httptest.NewRecorder()
+		testHandler.ActOnVCSReview(w, req)
+		return w
+	}
+	memberReq := newRequest("POST", "/api/issues/"+issue.ID+"/reviews/"+reviewID+"/actions", map[string]any{
+		"request_id": "00000000-0000-4000-8000-000000000000", "action": "reply",
+		"expected_head_sha": "head-2", "body": "not authorized",
+	})
+	memberCtx := chi.NewRouteContext()
+	memberCtx.URLParams.Add("id", issue.ID)
+	memberCtx.URLParams.Add("reviewId", reviewID)
+	memberReq = memberReq.WithContext(context.WithValue(memberReq.Context(), chi.RouteCtxKey, memberCtx))
+	member := httptest.NewRecorder()
+	testHandler.ActOnVCSReview(member, memberReq)
+	if member.Code != http.StatusForbidden || len(providerCalls) != 0 {
+		t.Fatalf("member action: status=%d calls=%v", member.Code, providerCalls)
+	}
+
+	stale := act("00000000-0000-4000-8000-000000000001", "reply", "head-1", "fixed")
+	if stale.Code != http.StatusConflict || len(providerCalls) != 0 {
+		t.Fatalf("stale action: status=%d calls=%v body=%s", stale.Code, providerCalls, stale.Body.String())
+	}
+	premature := act("00000000-0000-4000-8000-000000000004", "resolve", "head-2", "")
+	if premature.Code != http.StatusConflict || len(providerCalls) != 2 {
+		t.Fatalf("premature resolve: status=%d calls=%v body=%s", premature.Code, providerCalls, premature.Body.String())
+	}
+	reply := act("00000000-0000-4000-8000-000000000002", "reply", "head-2", "Fixed and tested.")
+	if reply.Code != http.StatusOK {
+		t.Fatalf("reply: %d %s", reply.Code, reply.Body.String())
+	}
+	resolve := act("00000000-0000-4000-8000-000000000003", "resolve", "head-2", "")
+	if resolve.Code != http.StatusOK {
+		t.Fatalf("resolve: %d %s", resolve.Code, resolve.Body.String())
+	}
+	if len(providerCalls) != 8 {
+		t.Fatalf("provider calls = %v, want 8", providerCalls)
+	}
+
+	var resolved bool
+	var succeeded int
+	if err := testPool.QueryRow(ctx, `SELECT resolved FROM vcs_review_thread WHERE id = $1`, reviewID).Scan(&resolved); err != nil || !resolved {
+		t.Fatalf("resolved=%v err=%v", resolved, err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM vcs_review_action WHERE review_thread_id = $1 AND status = 'succeeded'`, reviewID).Scan(&succeeded); err != nil || succeeded != 2 {
+		t.Fatalf("successful audit actions=%d err=%v", succeeded, err)
 	}
 }
 

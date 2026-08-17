@@ -11,6 +11,201 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const completeVCSReviewAction = `-- name: CompleteVCSReviewAction :one
+UPDATE vcs_review_action SET
+    status = $2, external_note_id = $3, error = $4, updated_at = now()
+WHERE request_id = $1
+RETURNING request_id, workspace_id, issue_id, review_thread_id, agent_id, task_id, action, expected_head_sha, body, status, external_note_id, error, created_at, updated_at
+`
+
+type CompleteVCSReviewActionParams struct {
+	RequestID      pgtype.UUID `json:"request_id"`
+	Status         string      `json:"status"`
+	ExternalNoteID string      `json:"external_note_id"`
+	Error          string      `json:"error"`
+}
+
+func (q *Queries) CompleteVCSReviewAction(ctx context.Context, arg CompleteVCSReviewActionParams) (VcsReviewAction, error) {
+	row := q.db.QueryRow(ctx, completeVCSReviewAction,
+		arg.RequestID,
+		arg.Status,
+		arg.ExternalNoteID,
+		arg.Error,
+	)
+	var i VcsReviewAction
+	err := row.Scan(
+		&i.RequestID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.ReviewThreadID,
+		&i.AgentID,
+		&i.TaskID,
+		&i.Action,
+		&i.ExpectedHeadSha,
+		&i.Body,
+		&i.Status,
+		&i.ExternalNoteID,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createVCSPullRequestNotification = `-- name: CreateVCSPullRequestNotification :one
+INSERT INTO vcs_pull_request_notification (pull_request_id, head_sha, kind)
+VALUES ($1, $2, $3)
+ON CONFLICT DO NOTHING
+RETURNING pull_request_id, head_sha, kind, created_at
+`
+
+type CreateVCSPullRequestNotificationParams struct {
+	PullRequestID pgtype.UUID `json:"pull_request_id"`
+	HeadSha       string      `json:"head_sha"`
+	Kind          string      `json:"kind"`
+}
+
+func (q *Queries) CreateVCSPullRequestNotification(ctx context.Context, arg CreateVCSPullRequestNotificationParams) (VcsPullRequestNotification, error) {
+	row := q.db.QueryRow(ctx, createVCSPullRequestNotification, arg.PullRequestID, arg.HeadSha, arg.Kind)
+	var i VcsPullRequestNotification
+	err := row.Scan(
+		&i.PullRequestID,
+		&i.HeadSha,
+		&i.Kind,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const createVCSReviewAction = `-- name: CreateVCSReviewAction :one
+INSERT INTO vcs_review_action (
+    request_id, workspace_id, issue_id, review_thread_id, agent_id, task_id,
+    action, expected_head_sha, body, status
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
+ON CONFLICT (request_id) DO NOTHING
+RETURNING request_id, workspace_id, issue_id, review_thread_id, agent_id, task_id, action, expected_head_sha, body, status, external_note_id, error, created_at, updated_at
+`
+
+type CreateVCSReviewActionParams struct {
+	RequestID       pgtype.UUID `json:"request_id"`
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	IssueID         pgtype.UUID `json:"issue_id"`
+	ReviewThreadID  pgtype.UUID `json:"review_thread_id"`
+	AgentID         pgtype.UUID `json:"agent_id"`
+	TaskID          pgtype.UUID `json:"task_id"`
+	Action          string      `json:"action"`
+	ExpectedHeadSha string      `json:"expected_head_sha"`
+	Body            string      `json:"body"`
+}
+
+func (q *Queries) CreateVCSReviewAction(ctx context.Context, arg CreateVCSReviewActionParams) (VcsReviewAction, error) {
+	row := q.db.QueryRow(ctx, createVCSReviewAction,
+		arg.RequestID,
+		arg.WorkspaceID,
+		arg.IssueID,
+		arg.ReviewThreadID,
+		arg.AgentID,
+		arg.TaskID,
+		arg.Action,
+		arg.ExpectedHeadSha,
+		arg.Body,
+	)
+	var i VcsReviewAction
+	err := row.Scan(
+		&i.RequestID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.ReviewThreadID,
+		&i.AgentID,
+		&i.TaskID,
+		&i.Action,
+		&i.ExpectedHeadSha,
+		&i.Body,
+		&i.Status,
+		&i.ExternalNoteID,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createVCSReviewThread = `-- name: CreateVCSReviewThread :one
+INSERT INTO vcs_review_thread (
+    workspace_id, connection_id, pull_request_id, provider, discussion_id,
+    note_id, note_url, reviewer_login, reviewer_name, reviewer_avatar_url,
+    body, head_sha, position, resolvable, resolved, event_action
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+    $11, $12, $13, $14, $15, $16
+)
+ON CONFLICT (connection_id, pull_request_id, note_id) DO NOTHING
+RETURNING id, workspace_id, connection_id, pull_request_id, provider, discussion_id, note_id, note_url, reviewer_login, reviewer_name, reviewer_avatar_url, body, head_sha, position, resolvable, resolved, event_action, created_at, updated_at
+`
+
+type CreateVCSReviewThreadParams struct {
+	WorkspaceID       pgtype.UUID `json:"workspace_id"`
+	ConnectionID      pgtype.UUID `json:"connection_id"`
+	PullRequestID     pgtype.UUID `json:"pull_request_id"`
+	Provider          string      `json:"provider"`
+	DiscussionID      string      `json:"discussion_id"`
+	NoteID            string      `json:"note_id"`
+	NoteUrl           string      `json:"note_url"`
+	ReviewerLogin     string      `json:"reviewer_login"`
+	ReviewerName      string      `json:"reviewer_name"`
+	ReviewerAvatarUrl string      `json:"reviewer_avatar_url"`
+	Body              string      `json:"body"`
+	HeadSha           string      `json:"head_sha"`
+	Position          []byte      `json:"position"`
+	Resolvable        bool        `json:"resolvable"`
+	Resolved          bool        `json:"resolved"`
+	EventAction       string      `json:"event_action"`
+}
+
+func (q *Queries) CreateVCSReviewThread(ctx context.Context, arg CreateVCSReviewThreadParams) (VcsReviewThread, error) {
+	row := q.db.QueryRow(ctx, createVCSReviewThread,
+		arg.WorkspaceID,
+		arg.ConnectionID,
+		arg.PullRequestID,
+		arg.Provider,
+		arg.DiscussionID,
+		arg.NoteID,
+		arg.NoteUrl,
+		arg.ReviewerLogin,
+		arg.ReviewerName,
+		arg.ReviewerAvatarUrl,
+		arg.Body,
+		arg.HeadSha,
+		arg.Position,
+		arg.Resolvable,
+		arg.Resolved,
+		arg.EventAction,
+	)
+	var i VcsReviewThread
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ConnectionID,
+		&i.PullRequestID,
+		&i.Provider,
+		&i.DiscussionID,
+		&i.NoteID,
+		&i.NoteUrl,
+		&i.ReviewerLogin,
+		&i.ReviewerName,
+		&i.ReviewerAvatarUrl,
+		&i.Body,
+		&i.HeadSha,
+		&i.Position,
+		&i.Resolvable,
+		&i.Resolved,
+		&i.EventAction,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const deleteVCSConnection = `-- name: DeleteVCSConnection :exec
 WITH target AS (
     SELECT vcs_connection.id FROM vcs_connection WHERE vcs_connection.id = $1 AND vcs_connection.workspace_id = $2
@@ -20,6 +215,23 @@ cleared_links AS (
     WHERE pull_request_id IN (
         SELECT vcs_pull_request.id FROM vcs_pull_request
         WHERE vcs_pull_request.connection_id IN (SELECT target.id FROM target)
+    )
+),
+cleared_review_actions AS (
+    DELETE FROM vcs_review_action
+    WHERE review_thread_id IN (
+        SELECT id FROM vcs_review_thread
+        WHERE connection_id IN (SELECT target.id FROM target)
+    )
+),
+cleared_review_threads AS (
+    DELETE FROM vcs_review_thread WHERE connection_id IN (SELECT target.id FROM target)
+),
+cleared_notifications AS (
+    DELETE FROM vcs_pull_request_notification
+    WHERE pull_request_id IN (
+        SELECT id FROM vcs_pull_request
+        WHERE connection_id IN (SELECT target.id FROM target)
     )
 ),
 cleared_statuses AS (
@@ -109,6 +321,175 @@ func (q *Queries) GetVCSConnectionByID(ctx context.Context, id pgtype.UUID) (Vcs
 	return i, err
 }
 
+const getVCSPullRequest = `-- name: GetVCSPullRequest :one
+SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, detailed_merge_status FROM vcs_pull_request WHERE id = $1
+`
+
+func (q *Queries) GetVCSPullRequest(ctx context.Context, id pgtype.UUID) (VcsPullRequest, error) {
+	row := q.db.QueryRow(ctx, getVCSPullRequest, id)
+	var i VcsPullRequest
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ConnectionID,
+		&i.Provider,
+		&i.RepoOwner,
+		&i.RepoName,
+		&i.PrNumber,
+		&i.Title,
+		&i.State,
+		&i.HtmlUrl,
+		&i.Branch,
+		&i.HeadSha,
+		&i.AuthorLogin,
+		&i.AuthorAvatarUrl,
+		&i.MergedAt,
+		&i.ClosedAt,
+		&i.PrCreatedAt,
+		&i.PrUpdatedAt,
+		&i.Additions,
+		&i.Deletions,
+		&i.ChangedFiles,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DetailedMergeStatus,
+	)
+	return i, err
+}
+
+const getVCSPullRequestByExternalID = `-- name: GetVCSPullRequestByExternalID :one
+SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, detailed_merge_status FROM vcs_pull_request
+WHERE connection_id = $1 AND repo_owner = $2 AND repo_name = $3 AND pr_number = $4
+`
+
+type GetVCSPullRequestByExternalIDParams struct {
+	ConnectionID pgtype.UUID `json:"connection_id"`
+	RepoOwner    string      `json:"repo_owner"`
+	RepoName     string      `json:"repo_name"`
+	PrNumber     int32       `json:"pr_number"`
+}
+
+func (q *Queries) GetVCSPullRequestByExternalID(ctx context.Context, arg GetVCSPullRequestByExternalIDParams) (VcsPullRequest, error) {
+	row := q.db.QueryRow(ctx, getVCSPullRequestByExternalID,
+		arg.ConnectionID,
+		arg.RepoOwner,
+		arg.RepoName,
+		arg.PrNumber,
+	)
+	var i VcsPullRequest
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ConnectionID,
+		&i.Provider,
+		&i.RepoOwner,
+		&i.RepoName,
+		&i.PrNumber,
+		&i.Title,
+		&i.State,
+		&i.HtmlUrl,
+		&i.Branch,
+		&i.HeadSha,
+		&i.AuthorLogin,
+		&i.AuthorAvatarUrl,
+		&i.MergedAt,
+		&i.ClosedAt,
+		&i.PrCreatedAt,
+		&i.PrUpdatedAt,
+		&i.Additions,
+		&i.Deletions,
+		&i.ChangedFiles,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DetailedMergeStatus,
+	)
+	return i, err
+}
+
+const getVCSReviewAction = `-- name: GetVCSReviewAction :one
+SELECT request_id, workspace_id, issue_id, review_thread_id, agent_id, task_id, action, expected_head_sha, body, status, external_note_id, error, created_at, updated_at FROM vcs_review_action WHERE request_id = $1
+`
+
+func (q *Queries) GetVCSReviewAction(ctx context.Context, requestID pgtype.UUID) (VcsReviewAction, error) {
+	row := q.db.QueryRow(ctx, getVCSReviewAction, requestID)
+	var i VcsReviewAction
+	err := row.Scan(
+		&i.RequestID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.ReviewThreadID,
+		&i.AgentID,
+		&i.TaskID,
+		&i.Action,
+		&i.ExpectedHeadSha,
+		&i.Body,
+		&i.Status,
+		&i.ExternalNoteID,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getVCSReviewThreadForIssue = `-- name: GetVCSReviewThreadForIssue :one
+SELECT rt.id, rt.workspace_id, rt.connection_id, rt.pull_request_id, rt.provider, rt.discussion_id, rt.note_id, rt.note_url, rt.reviewer_login, rt.reviewer_name, rt.reviewer_avatar_url, rt.body, rt.head_sha, rt.position, rt.resolvable, rt.resolved, rt.event_action, rt.created_at, rt.updated_at FROM vcs_review_thread rt
+JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = rt.pull_request_id
+WHERE rt.id = $1 AND ipr.issue_id = $2 AND NOT ipr.reference_only
+`
+
+type GetVCSReviewThreadForIssueParams struct {
+	ID      pgtype.UUID `json:"id"`
+	IssueID pgtype.UUID `json:"issue_id"`
+}
+
+func (q *Queries) GetVCSReviewThreadForIssue(ctx context.Context, arg GetVCSReviewThreadForIssueParams) (VcsReviewThread, error) {
+	row := q.db.QueryRow(ctx, getVCSReviewThreadForIssue, arg.ID, arg.IssueID)
+	var i VcsReviewThread
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ConnectionID,
+		&i.PullRequestID,
+		&i.Provider,
+		&i.DiscussionID,
+		&i.NoteID,
+		&i.NoteUrl,
+		&i.ReviewerLogin,
+		&i.ReviewerName,
+		&i.ReviewerAvatarUrl,
+		&i.Body,
+		&i.HeadSha,
+		&i.Position,
+		&i.Resolvable,
+		&i.Resolved,
+		&i.EventAction,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const hasSuccessfulVCSReviewReply = `-- name: HasSuccessfulVCSReviewReply :one
+SELECT EXISTS (
+    SELECT 1 FROM vcs_review_action
+    WHERE review_thread_id = $1 AND expected_head_sha = $2
+      AND action = 'reply' AND status = 'succeeded'
+)
+`
+
+type HasSuccessfulVCSReviewReplyParams struct {
+	ReviewThreadID  pgtype.UUID `json:"review_thread_id"`
+	ExpectedHeadSha string      `json:"expected_head_sha"`
+}
+
+func (q *Queries) HasSuccessfulVCSReviewReply(ctx context.Context, arg HasSuccessfulVCSReviewReplyParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasSuccessfulVCSReviewReply, arg.ReviewThreadID, arg.ExpectedHeadSha)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const linkIssueToVCSPullRequest = `-- name: LinkIssueToVCSPullRequest :exec
 
 INSERT INTO issue_vcs_pull_request (
@@ -191,6 +572,60 @@ func (q *Queries) ListIssueIDsForVCSPRHead(ctx context.Context, arg ListIssueIDs
 	return items, nil
 }
 
+const listIssuesForVCSPullRequest = `-- name: ListIssuesForVCSPullRequest :many
+SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.start_date, i.metadata, i.stage, i.properties FROM issue i
+JOIN issue_vcs_pull_request ipr ON ipr.issue_id = i.id
+WHERE ipr.pull_request_id = $1 AND NOT ipr.reference_only
+ORDER BY i.created_at
+`
+
+func (q *Queries) ListIssuesForVCSPullRequest(ctx context.Context, pullRequestID pgtype.UUID) ([]Issue, error) {
+	rows, err := q.db.Query(ctx, listIssuesForVCSPullRequest, pullRequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Issue{}
+	for rows.Next() {
+		var i Issue
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.Priority,
+			&i.AssigneeType,
+			&i.AssigneeID,
+			&i.CreatorType,
+			&i.CreatorID,
+			&i.ParentIssueID,
+			&i.AcceptanceCriteria,
+			&i.ContextRefs,
+			&i.Position,
+			&i.DueDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Number,
+			&i.ProjectID,
+			&i.OriginType,
+			&i.OriginID,
+			&i.FirstExecutedAt,
+			&i.StartDate,
+			&i.Metadata,
+			&i.Stage,
+			&i.Properties,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVCSConnectionsByWorkspace = `-- name: ListVCSConnectionsByWorkspace :many
 
 SELECT id, workspace_id, provider, instance_url, account_login, access_token_encrypted, webhook_secret_encrypted, connected_by_id, created_at, updated_at FROM vcs_connection
@@ -250,7 +685,7 @@ WITH checks AS (
     GROUP BY pr.id
 )
 SELECT
-    pr.id, pr.workspace_id, pr.connection_id, pr.provider, pr.repo_owner, pr.repo_name, pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.head_sha, pr.author_login, pr.author_avatar_url, pr.merged_at, pr.closed_at, pr.pr_created_at, pr.pr_updated_at, pr.additions, pr.deletions, pr.changed_files, pr.created_at, pr.updated_at,
+    pr.id, pr.workspace_id, pr.connection_id, pr.provider, pr.repo_owner, pr.repo_name, pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.head_sha, pr.author_login, pr.author_avatar_url, pr.merged_at, pr.closed_at, pr.pr_created_at, pr.pr_updated_at, pr.additions, pr.deletions, pr.changed_files, pr.created_at, pr.updated_at, pr.detailed_merge_status,
     COALESCE(c.total, 0)::bigint   AS checks_total,
     COALESCE(c.passed, 0)::bigint  AS checks_passed,
     COALESCE(c.failed, 0)::bigint  AS checks_failed,
@@ -263,33 +698,34 @@ ORDER BY pr.pr_created_at DESC
 `
 
 type ListVCSPullRequestsByIssueRow struct {
-	ID              pgtype.UUID        `json:"id"`
-	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	ConnectionID    pgtype.UUID        `json:"connection_id"`
-	Provider        string             `json:"provider"`
-	RepoOwner       string             `json:"repo_owner"`
-	RepoName        string             `json:"repo_name"`
-	PrNumber        int32              `json:"pr_number"`
-	Title           string             `json:"title"`
-	State           string             `json:"state"`
-	HtmlUrl         string             `json:"html_url"`
-	Branch          pgtype.Text        `json:"branch"`
-	HeadSha         string             `json:"head_sha"`
-	AuthorLogin     pgtype.Text        `json:"author_login"`
-	AuthorAvatarUrl pgtype.Text        `json:"author_avatar_url"`
-	MergedAt        pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt        pgtype.Timestamptz `json:"closed_at"`
-	PrCreatedAt     pgtype.Timestamptz `json:"pr_created_at"`
-	PrUpdatedAt     pgtype.Timestamptz `json:"pr_updated_at"`
-	Additions       int32              `json:"additions"`
-	Deletions       int32              `json:"deletions"`
-	ChangedFiles    int32              `json:"changed_files"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
-	ChecksTotal     int64              `json:"checks_total"`
-	ChecksPassed    int64              `json:"checks_passed"`
-	ChecksFailed    int64              `json:"checks_failed"`
-	ChecksPending   int64              `json:"checks_pending"`
+	ID                  pgtype.UUID        `json:"id"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	ConnectionID        pgtype.UUID        `json:"connection_id"`
+	Provider            string             `json:"provider"`
+	RepoOwner           string             `json:"repo_owner"`
+	RepoName            string             `json:"repo_name"`
+	PrNumber            int32              `json:"pr_number"`
+	Title               string             `json:"title"`
+	State               string             `json:"state"`
+	HtmlUrl             string             `json:"html_url"`
+	Branch              pgtype.Text        `json:"branch"`
+	HeadSha             string             `json:"head_sha"`
+	AuthorLogin         pgtype.Text        `json:"author_login"`
+	AuthorAvatarUrl     pgtype.Text        `json:"author_avatar_url"`
+	MergedAt            pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt            pgtype.Timestamptz `json:"closed_at"`
+	PrCreatedAt         pgtype.Timestamptz `json:"pr_created_at"`
+	PrUpdatedAt         pgtype.Timestamptz `json:"pr_updated_at"`
+	Additions           int32              `json:"additions"`
+	Deletions           int32              `json:"deletions"`
+	ChangedFiles        int32              `json:"changed_files"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	DetailedMergeStatus string             `json:"detailed_merge_status"`
+	ChecksTotal         int64              `json:"checks_total"`
+	ChecksPassed        int64              `json:"checks_passed"`
+	ChecksFailed        int64              `json:"checks_failed"`
+	ChecksPending       int64              `json:"checks_pending"`
 }
 
 // Aggregates each PR's commit statuses for its CURRENT head sha into
@@ -330,6 +766,7 @@ func (q *Queries) ListVCSPullRequestsByIssue(ctx context.Context, issueID pgtype
 			&i.ChangedFiles,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.DetailedMergeStatus,
 			&i.ChecksTotal,
 			&i.ChecksPassed,
 			&i.ChecksFailed,
@@ -343,6 +780,15 @@ func (q *Queries) ListVCSPullRequestsByIssue(ctx context.Context, issueID pgtype
 		return nil, err
 	}
 	return items, nil
+}
+
+const markVCSReviewThreadResolved = `-- name: MarkVCSReviewThreadResolved :exec
+UPDATE vcs_review_thread SET resolved = TRUE, updated_at = now() WHERE id = $1
+`
+
+func (q *Queries) MarkVCSReviewThreadResolved(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markVCSReviewThreadResolved, id)
+	return err
 }
 
 const rotateVCSConnectionWebhookSecret = `-- name: RotateVCSConnectionWebhookSecret :one
@@ -482,12 +928,12 @@ INSERT INTO vcs_pull_request (
     workspace_id, connection_id, provider, repo_owner, repo_name, pr_number,
     title, state, html_url, branch, author_login, author_avatar_url,
     merged_at, closed_at, pr_created_at, pr_updated_at,
-    additions, deletions, changed_files, head_sha
+    additions, deletions, changed_files, head_sha, detailed_merge_status
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
-    $7, $8, $9, $16, $17, $18,
-    $19, $20, $10, $11,
-    $12, $13, $14, $15
+    $7, $8, $9, $17, $18, $19,
+    $20, $21, $10, $11,
+    $12, $13, $14, $15, $16
 )
 ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     workspace_id      = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.workspace_id      ELSE vcs_pull_request.workspace_id      END,
@@ -505,31 +951,33 @@ ON CONFLICT (connection_id, repo_owner, repo_name, pr_number) DO UPDATE SET
     deletions         = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.deletions         ELSE vcs_pull_request.deletions         END,
     changed_files     = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.changed_files     ELSE vcs_pull_request.changed_files     END,
     head_sha          = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.head_sha          ELSE vcs_pull_request.head_sha          END,
+    detailed_merge_status = CASE WHEN EXCLUDED.pr_updated_at >= vcs_pull_request.pr_updated_at THEN EXCLUDED.detailed_merge_status ELSE vcs_pull_request.detailed_merge_status END,
     updated_at        = now()
-RETURNING id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at
+RETURNING id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at, detailed_merge_status
 `
 
 type UpsertVCSPullRequestParams struct {
-	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	ConnectionID    pgtype.UUID        `json:"connection_id"`
-	Provider        string             `json:"provider"`
-	RepoOwner       string             `json:"repo_owner"`
-	RepoName        string             `json:"repo_name"`
-	PrNumber        int32              `json:"pr_number"`
-	Title           string             `json:"title"`
-	State           string             `json:"state"`
-	HtmlUrl         string             `json:"html_url"`
-	PrCreatedAt     pgtype.Timestamptz `json:"pr_created_at"`
-	PrUpdatedAt     pgtype.Timestamptz `json:"pr_updated_at"`
-	Additions       int32              `json:"additions"`
-	Deletions       int32              `json:"deletions"`
-	ChangedFiles    int32              `json:"changed_files"`
-	HeadSha         string             `json:"head_sha"`
-	Branch          pgtype.Text        `json:"branch"`
-	AuthorLogin     pgtype.Text        `json:"author_login"`
-	AuthorAvatarUrl pgtype.Text        `json:"author_avatar_url"`
-	MergedAt        pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt        pgtype.Timestamptz `json:"closed_at"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	ConnectionID        pgtype.UUID        `json:"connection_id"`
+	Provider            string             `json:"provider"`
+	RepoOwner           string             `json:"repo_owner"`
+	RepoName            string             `json:"repo_name"`
+	PrNumber            int32              `json:"pr_number"`
+	Title               string             `json:"title"`
+	State               string             `json:"state"`
+	HtmlUrl             string             `json:"html_url"`
+	PrCreatedAt         pgtype.Timestamptz `json:"pr_created_at"`
+	PrUpdatedAt         pgtype.Timestamptz `json:"pr_updated_at"`
+	Additions           int32              `json:"additions"`
+	Deletions           int32              `json:"deletions"`
+	ChangedFiles        int32              `json:"changed_files"`
+	HeadSha             string             `json:"head_sha"`
+	DetailedMergeStatus string             `json:"detailed_merge_status"`
+	Branch              pgtype.Text        `json:"branch"`
+	AuthorLogin         pgtype.Text        `json:"author_login"`
+	AuthorAvatarUrl     pgtype.Text        `json:"author_avatar_url"`
+	MergedAt            pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt            pgtype.Timestamptz `json:"closed_at"`
 }
 
 // =====================
@@ -558,6 +1006,7 @@ func (q *Queries) UpsertVCSPullRequest(ctx context.Context, arg UpsertVCSPullReq
 		arg.Deletions,
 		arg.ChangedFiles,
 		arg.HeadSha,
+		arg.DetailedMergeStatus,
 		arg.Branch,
 		arg.AuthorLogin,
 		arg.AuthorAvatarUrl,
@@ -589,6 +1038,7 @@ func (q *Queries) UpsertVCSPullRequest(ctx context.Context, arg UpsertVCSPullReq
 		&i.ChangedFiles,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DetailedMergeStatus,
 	)
 	return i, err
 }

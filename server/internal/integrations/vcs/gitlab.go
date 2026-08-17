@@ -1,6 +1,7 @@
 package vcs
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -8,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +33,8 @@ func (gitlabProvider) EventKind(h http.Header) EventKind {
 		return EventPullRequest
 	case "Pipeline Hook":
 		return EventCIStatus
+	case "Note Hook":
+		return EventReview
 	default:
 		return EventOther
 	}
@@ -70,6 +75,7 @@ type glMergeRequestPayload struct {
 		LastCommit     struct {
 			ID string `json:"id"`
 		} `json:"last_commit"`
+		DetailedMergeStatus string `json:"detailed_merge_status"`
 	} `json:"object_attributes"`
 }
 
@@ -82,21 +88,199 @@ func (gitlabProvider) ParsePullRequest(body []byte) (PullRequestEvent, error) {
 	draft := d.ObjectAttributes.Draft || d.ObjectAttributes.WorkInProgress ||
 		strings.HasPrefix(strings.ToLower(d.ObjectAttributes.Title), "draft:")
 	return PullRequestEvent{
-		Action:          d.ObjectAttributes.Action,
-		RepoOwner:       owner,
-		RepoName:        name,
-		Number:          d.ObjectAttributes.IID,
-		Title:           d.ObjectAttributes.Title,
-		Body:            d.ObjectAttributes.Description,
-		State:           normalizeGitLabMRState(d.ObjectAttributes.State, draft),
-		HTMLURL:         d.ObjectAttributes.URL,
-		Branch:          d.ObjectAttributes.SourceBranch,
-		HeadSHA:         d.ObjectAttributes.LastCommit.ID,
-		AuthorLogin:     d.User.Username,
-		AuthorAvatarURL: d.User.AvatarURL,
-		CreatedAt:       normalizeGitLabTime(d.ObjectAttributes.CreatedAt),
-		UpdatedAt:       normalizeGitLabTime(d.ObjectAttributes.UpdatedAt),
+		Action:              d.ObjectAttributes.Action,
+		RepoOwner:           owner,
+		RepoName:            name,
+		Number:              d.ObjectAttributes.IID,
+		Title:               d.ObjectAttributes.Title,
+		Body:                d.ObjectAttributes.Description,
+		State:               normalizeGitLabMRState(d.ObjectAttributes.State, draft),
+		HTMLURL:             d.ObjectAttributes.URL,
+		Branch:              d.ObjectAttributes.SourceBranch,
+		HeadSHA:             d.ObjectAttributes.LastCommit.ID,
+		AuthorLogin:         d.User.Username,
+		AuthorAvatarURL:     d.User.AvatarURL,
+		CreatedAt:           normalizeGitLabTime(d.ObjectAttributes.CreatedAt),
+		UpdatedAt:           normalizeGitLabTime(d.ObjectAttributes.UpdatedAt),
+		DetailedMergeStatus: d.ObjectAttributes.DetailedMergeStatus,
 	}, nil
+}
+
+type glNotePayload struct {
+	ObjectKind string `json:"object_kind"`
+	User       struct {
+		Name      string `json:"name"`
+		Username  string `json:"username"`
+		AvatarURL string `json:"avatar_url"`
+	} `json:"user"`
+	Project struct {
+		PathWithNamespace string `json:"path_with_namespace"`
+	} `json:"project"`
+	ObjectAttributes struct {
+		ID           int64           `json:"id"`
+		Note         string          `json:"note"`
+		NoteableType string          `json:"noteable_type"`
+		DiscussionID string          `json:"discussion_id"`
+		System       bool            `json:"system"`
+		Action       string          `json:"action"`
+		URL          string          `json:"url"`
+		Position     json.RawMessage `json:"position"`
+		Resolvable   bool            `json:"resolvable"`
+		Resolved     bool            `json:"resolved"`
+	} `json:"object_attributes"`
+	MergeRequest struct {
+		IID        int32  `json:"iid"`
+		URL        string `json:"url"`
+		LastCommit struct {
+			ID string `json:"id"`
+		} `json:"last_commit"`
+	} `json:"merge_request"`
+}
+
+func (gitlabProvider) ParseReview(body []byte) (ReviewEvent, error) {
+	var d glNotePayload
+	if err := json.Unmarshal(body, &d); err != nil {
+		return ReviewEvent{}, err
+	}
+	if d.ObjectAttributes.NoteableType != "MergeRequest" || d.MergeRequest.IID == 0 {
+		return ReviewEvent{}, errors.New("gitlab: note is not attached to a merge request")
+	}
+	owner, name := splitNamespace(d.Project.PathWithNamespace)
+	return ReviewEvent{
+		RepoOwner: owner, RepoName: name, Number: d.MergeRequest.IID,
+		MRURL: d.MergeRequest.URL, NoteURL: d.ObjectAttributes.URL, HeadSHA: d.MergeRequest.LastCommit.ID,
+		DiscussionID:  d.ObjectAttributes.DiscussionID,
+		NoteID:        strconv.FormatInt(d.ObjectAttributes.ID, 10),
+		ReviewerLogin: d.User.Username, ReviewerName: d.User.Name,
+		ReviewerAvatarURL: d.User.AvatarURL, Body: d.ObjectAttributes.Note,
+		Action: d.ObjectAttributes.Action, System: d.ObjectAttributes.System,
+		Resolvable: d.ObjectAttributes.Resolvable, Resolved: d.ObjectAttributes.Resolved,
+		Position: d.ObjectAttributes.Position,
+	}, nil
+}
+
+type glDiscussion struct {
+	ID    string `json:"id"`
+	Notes []struct {
+		ID         int64           `json:"id"`
+		Resolvable bool            `json:"resolvable"`
+		Resolved   bool            `json:"resolved"`
+		Position   json.RawMessage `json:"position"`
+	} `json:"notes"`
+}
+
+func (gitlabProvider) EnrichReview(ctx context.Context, instanceURL, token string, event ReviewEvent) (ReviewEvent, error) {
+	if event.DiscussionID != "" {
+		return event, nil
+	}
+	project := strings.Trim(event.RepoOwner+"/"+event.RepoName, "/")
+	for page := 1; page <= 100; page++ {
+		path := fmt.Sprintf("/api/v4/projects/%s/merge_requests/%d/discussions?per_page=100&page=%d", url.PathEscape(project), event.Number, page)
+		var discussions []glDiscussion
+		if err := gitlabJSON(ctx, http.MethodGet, instanceURL, token, path, nil, &discussions); err != nil {
+			return ReviewEvent{}, err
+		}
+		for _, discussion := range discussions {
+			for _, note := range discussion.Notes {
+				if strconv.FormatInt(note.ID, 10) == event.NoteID {
+					event.DiscussionID = discussion.ID
+					event.Resolvable = note.Resolvable
+					event.Resolved = note.Resolved
+					if len(event.Position) == 0 || string(event.Position) == "null" {
+						event.Position = note.Position
+					}
+					return event, nil
+				}
+			}
+		}
+		if len(discussions) < 100 {
+			break
+		}
+	}
+	return ReviewEvent{}, errors.New("gitlab: note discussion not found")
+}
+
+func (gitlabProvider) ValidateReview(ctx context.Context, instanceURL, token string, target ReviewTarget) (ReviewState, error) {
+	project := url.PathEscape(target.ProjectPath)
+	var mr struct {
+		SHA   string `json:"sha"`
+		State string `json:"state"`
+	}
+	if err := gitlabJSON(ctx, http.MethodGet, instanceURL, token,
+		fmt.Sprintf("/api/v4/projects/%s/merge_requests/%d", project, target.Number), nil, &mr); err != nil {
+		return ReviewState{}, err
+	}
+	if mr.State != "opened" || mr.SHA == "" || mr.SHA != target.ExpectedHeadSHA {
+		return ReviewState{HeadSHA: mr.SHA, Open: mr.State == "opened"}, errors.New("gitlab: merge request head changed or is not open")
+	}
+	var discussion glDiscussion
+	if err := gitlabJSON(ctx, http.MethodGet, instanceURL, token,
+		fmt.Sprintf("/api/v4/projects/%s/merge_requests/%d/discussions/%s", project, target.Number, url.PathEscape(target.DiscussionID)), nil, &discussion); err != nil {
+		return ReviewState{}, err
+	}
+	if discussion.ID != target.DiscussionID {
+		return ReviewState{}, errors.New("gitlab: discussion identity mismatch")
+	}
+	for _, note := range discussion.Notes {
+		if strconv.FormatInt(note.ID, 10) == target.NoteID {
+			return ReviewState{HeadSHA: mr.SHA, Open: true, Resolvable: note.Resolvable, Resolved: note.Resolved}, nil
+		}
+	}
+	return ReviewState{}, errors.New("gitlab: review note not found in discussion")
+}
+
+func (gitlabProvider) ReplyReview(ctx context.Context, instanceURL, token string, target ReviewTarget, body string) (string, error) {
+	var note struct {
+		ID int64 `json:"id"`
+	}
+	err := gitlabJSON(ctx, http.MethodPost, instanceURL, token,
+		fmt.Sprintf("/api/v4/projects/%s/merge_requests/%d/discussions/%s/notes", url.PathEscape(target.ProjectPath), target.Number, url.PathEscape(target.DiscussionID)),
+		map[string]string{"body": body}, &note)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(note.ID, 10), nil
+}
+
+func (gitlabProvider) ResolveReview(ctx context.Context, instanceURL, token string, target ReviewTarget) error {
+	return gitlabJSON(ctx, http.MethodPut, instanceURL, token,
+		fmt.Sprintf("/api/v4/projects/%s/merge_requests/%d/discussions/%s", url.PathEscape(target.ProjectPath), target.Number, url.PathEscape(target.DiscussionID)),
+		map[string]bool{"resolved": true}, nil)
+}
+
+func gitlabJSON(ctx context.Context, method, instanceURL, token, path string, body any, out any) error {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("gitlab: encode request: %w", err)
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, NormalizeInstanceURL(instanceURL)+path, reader)
+	if err != nil {
+		return fmt.Errorf("gitlab: build request: %w", err)
+	}
+	req.Header.Set("PRIVATE-TOKEN", token)
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("gitlab: request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("gitlab: %s %s: status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	if out != nil && resp.StatusCode != http.StatusNoContent {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return fmt.Errorf("gitlab: decode response: %w", err)
+		}
+	}
+	return nil
 }
 
 // normalizeGitLabTime converts GitLab's webhook timestamp format

@@ -5,9 +5,11 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -149,7 +151,7 @@ func TestGitlabParse(t *testing.T) {
 		"project":{"path_with_namespace":"group/sub/widget"},
 		"object_attributes":{"iid":42,"title":"Add MUL-9","state":"merged","action":"merge",
 			"source_branch":"feat","url":"https://gl/group/sub/widget/-/merge_requests/42",
-			"last_commit":{"id":"deadbeef"}}}`))
+			"last_commit":{"id":"deadbeef"},"detailed_merge_status":"need_rebase"}}`))
 	if err != nil {
 		t.Fatalf("ParsePullRequest: %v", err)
 	}
@@ -158,6 +160,9 @@ func TestGitlabParse(t *testing.T) {
 	}
 	if pr.Number != 42 || pr.State != "merged" || pr.HeadSHA != "deadbeef" {
 		t.Errorf("bad MR: %+v", pr)
+	}
+	if pr.DetailedMergeStatus != "need_rebase" {
+		t.Errorf("detailed merge status = %q", pr.DetailedMergeStatus)
 	}
 	if !pr.Terminal() {
 		t.Error("merge action must be terminal")
@@ -173,6 +178,88 @@ func TestGitlabParse(t *testing.T) {
 	}
 	if st.SHA != "deadbeef" || st.State != "failed" || st.Context != "gitlab/pipeline" {
 		t.Errorf("bad status: %+v", st)
+	}
+}
+
+func TestGitlabReviewParseAndAPI(t *testing.T) {
+	p, _ := For("gitlab")
+	h := http.Header{"X-Gitlab-Event": []string{"Note Hook"}}
+	if p.EventKind(h) != EventReview {
+		t.Fatal("Note Hook not classified as review")
+	}
+	reviewProvider := p.(ReviewProvider)
+	review, err := reviewProvider.ParseReview([]byte(`{
+		"object_kind":"note",
+		"user":{"name":"Alice","username":"alice","avatar_url":"avatar"},
+		"project":{"path_with_namespace":"group/sub/widget"},
+		"object_attributes":{"id":55,"note":"Please cover the nil case","noteable_type":"MergeRequest",
+			"discussion_id":"disc-1","system":false,"action":"create","url":"https://gl/note/55",
+			"resolvable":true,"resolved":false,"position":{"head_sha":"old-head","new_path":"a.go","new_line":9}},
+		"merge_request":{"iid":42,"last_commit":{"id":"old-head"}}}`))
+	if err != nil {
+		t.Fatalf("ParseReview: %v", err)
+	}
+	if review.DiscussionID != "disc-1" || review.NoteID != "55" || review.HeadSHA != "old-head" ||
+		review.ReviewerLogin != "alice" || !review.Resolvable || review.Resolved {
+		t.Fatalf("bad review: %+v", review)
+	}
+
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("PRIVATE-TOKEN") != "tok" {
+			t.Errorf("missing token")
+			w.WriteHeader(401)
+			return
+		}
+		calls = append(calls, r.Method+" "+r.URL.EscapedPath())
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/merge_requests/42"):
+			_, _ = w.Write([]byte(`{"sha":"new-head","state":"opened"}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/discussions/disc-1"):
+			_, _ = w.Write([]byte(`{"id":"disc-1","notes":[{"id":55,"resolvable":true,"resolved":false}]}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/discussions/disc-1/notes"):
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["body"] != "Fixed in new-head" {
+				t.Errorf("reply body = %q", body["body"])
+			}
+			_, _ = w.Write([]byte(`{"id":99}`))
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/discussions/disc-1"):
+			_, _ = w.Write([]byte(`{"id":"disc-1"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	target := ReviewTarget{ProjectPath: "group/sub/widget", Number: 42, DiscussionID: "disc-1", NoteID: "55", ExpectedHeadSHA: "new-head"}
+	state, err := reviewProvider.ValidateReview(context.Background(), srv.URL, "tok", target)
+	if err != nil || state.HeadSHA != "new-head" || !state.Resolvable {
+		t.Fatalf("ValidateReview: state=%+v err=%v", state, err)
+	}
+	noteID, err := reviewProvider.ReplyReview(context.Background(), srv.URL, "tok", target, "Fixed in new-head")
+	if err != nil || noteID != "99" {
+		t.Fatalf("ReplyReview: id=%q err=%v", noteID, err)
+	}
+	if err := reviewProvider.ResolveReview(context.Background(), srv.URL, "tok", target); err != nil {
+		t.Fatalf("ResolveReview: %v", err)
+	}
+	if len(calls) != 4 {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+func TestGitlabEnrichReviewFindsDiscussionByNote(t *testing.T) {
+	p, _ := For("gitlab")
+	reviewProvider := p.(ReviewProvider)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":"disc-2","notes":[{"id":77,"resolvable":true,"resolved":false,"position":{"head_sha":"abc"}}]}]`))
+	}))
+	defer srv.Close()
+	event, err := reviewProvider.EnrichReview(context.Background(), srv.URL, "tok", ReviewEvent{
+		RepoOwner: "group", RepoName: "widget", Number: 3, NoteID: "77",
+	})
+	if err != nil || event.DiscussionID != "disc-2" || !event.Resolvable || len(event.Position) == 0 {
+		t.Fatalf("EnrichReview: event=%+v err=%v", event, err)
 	}
 }
 

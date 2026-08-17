@@ -1394,29 +1394,76 @@ type VcsConnection struct {
 }
 
 type VcsPullRequest struct {
-	ID              pgtype.UUID        `json:"id"`
+	ID                  pgtype.UUID        `json:"id"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	ConnectionID        pgtype.UUID        `json:"connection_id"`
+	Provider            string             `json:"provider"`
+	RepoOwner           string             `json:"repo_owner"`
+	RepoName            string             `json:"repo_name"`
+	PrNumber            int32              `json:"pr_number"`
+	Title               string             `json:"title"`
+	State               string             `json:"state"`
+	HtmlUrl             string             `json:"html_url"`
+	Branch              pgtype.Text        `json:"branch"`
+	HeadSha             string             `json:"head_sha"`
+	AuthorLogin         pgtype.Text        `json:"author_login"`
+	AuthorAvatarUrl     pgtype.Text        `json:"author_avatar_url"`
+	MergedAt            pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt            pgtype.Timestamptz `json:"closed_at"`
+	PrCreatedAt         pgtype.Timestamptz `json:"pr_created_at"`
+	PrUpdatedAt         pgtype.Timestamptz `json:"pr_updated_at"`
+	Additions           int32              `json:"additions"`
+	Deletions           int32              `json:"deletions"`
+	ChangedFiles        int32              `json:"changed_files"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	DetailedMergeStatus string             `json:"detailed_merge_status"`
+}
+
+type VcsPullRequestNotification struct {
+	PullRequestID pgtype.UUID        `json:"pull_request_id"`
+	HeadSha       string             `json:"head_sha"`
+	Kind          string             `json:"kind"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+type VcsReviewAction struct {
+	RequestID       pgtype.UUID        `json:"request_id"`
 	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	ConnectionID    pgtype.UUID        `json:"connection_id"`
-	Provider        string             `json:"provider"`
-	RepoOwner       string             `json:"repo_owner"`
-	RepoName        string             `json:"repo_name"`
-	PrNumber        int32              `json:"pr_number"`
-	Title           string             `json:"title"`
-	State           string             `json:"state"`
-	HtmlUrl         string             `json:"html_url"`
-	Branch          pgtype.Text        `json:"branch"`
-	HeadSha         string             `json:"head_sha"`
-	AuthorLogin     pgtype.Text        `json:"author_login"`
-	AuthorAvatarUrl pgtype.Text        `json:"author_avatar_url"`
-	MergedAt        pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt        pgtype.Timestamptz `json:"closed_at"`
-	PrCreatedAt     pgtype.Timestamptz `json:"pr_created_at"`
-	PrUpdatedAt     pgtype.Timestamptz `json:"pr_updated_at"`
-	Additions       int32              `json:"additions"`
-	Deletions       int32              `json:"deletions"`
-	ChangedFiles    int32              `json:"changed_files"`
+	IssueID         pgtype.UUID        `json:"issue_id"`
+	ReviewThreadID  pgtype.UUID        `json:"review_thread_id"`
+	AgentID         pgtype.UUID        `json:"agent_id"`
+	TaskID          pgtype.UUID        `json:"task_id"`
+	Action          string             `json:"action"`
+	ExpectedHeadSha string             `json:"expected_head_sha"`
+	Body            string             `json:"body"`
+	Status          string             `json:"status"`
+	ExternalNoteID  string             `json:"external_note_id"`
+	Error           string             `json:"error"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type VcsReviewThread struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	ConnectionID      pgtype.UUID        `json:"connection_id"`
+	PullRequestID     pgtype.UUID        `json:"pull_request_id"`
+	Provider          string             `json:"provider"`
+	DiscussionID      string             `json:"discussion_id"`
+	NoteID            string             `json:"note_id"`
+	NoteUrl           string             `json:"note_url"`
+	ReviewerLogin     string             `json:"reviewer_login"`
+	ReviewerName      string             `json:"reviewer_name"`
+	ReviewerAvatarUrl string             `json:"reviewer_avatar_url"`
+	Body              string             `json:"body"`
+	HeadSha           string             `json:"head_sha"`
+	Position          []byte             `json:"position"`
+	Resolvable        bool               `json:"resolvable"`
+	Resolved          bool               `json:"resolved"`
+	EventAction       string             `json:"event_action"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
 type VerificationCode struct {
